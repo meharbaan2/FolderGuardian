@@ -1,103 +1,186 @@
-﻿using System.IO;
+using System.IO;
+using System.Linq;
 
-namespace FolderGuardian.Core
+namespace FolderGuardian.Core;
+
+internal sealed class FolderMonitor : IDisposable
 {
-    class FolderMonitor
+    private static readonly HashSet<string> SuspiciousExtensions = new(StringComparer.OrdinalIgnoreCase)
     {
-        private FileSystemWatcher watcher;
-        private string folderPath;
-        private readonly object _lock = new();
-        // Tracks the last time we logged an event for a given path to avoid duplicates
-        private readonly Dictionary<string, DateTime> _lastEventTimes = new();
-        private readonly Action<string>? _logger; // optional logger callback
+        ".exe",
+        ".ps1",
+        ".bat",
+        ".cmd",
+        ".vbs",
+        ".js",
+        ".scr"
+    };
 
-        public FolderMonitor(string path, Action<string>? logger = null)
+    private readonly FileSystemWatcher _watcher;
+    private readonly Action<string>? _logger;
+    private readonly object _eventLock = new();
+    private readonly object _logFileLock = new();
+    private readonly Dictionary<string, DateTime> _lastEventTimes = new(StringComparer.OrdinalIgnoreCase);
+    private bool _disposed;
+
+    public FolderMonitor(string folderPath, Action<string>? logger = null)
+    {
+        FolderPath = folderPath;
+        _logger = logger;
+        LogFilePath = Path.Combine(FolderPath, "SecurityLog.txt");
+
+        Directory.CreateDirectory(FolderPath);
+
+        _watcher = new FileSystemWatcher(FolderPath)
         {
-            folderPath = path;
-            _logger = logger;
+            IncludeSubdirectories = true,
+            EnableRaisingEvents = false,
+            NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.CreationTime,
+            InternalBufferSize = 32 * 1024
+        };
 
-            if (!Directory.Exists(folderPath))
-                Directory.CreateDirectory(folderPath);
+        _watcher.Changed += OnChanged;
+        _watcher.Created += OnCreated;
+        _watcher.Deleted += OnDeleted;
+        _watcher.Renamed += OnRenamed;
+        _watcher.Error += OnError;
+    }
 
-            watcher = new FileSystemWatcher(folderPath)
-            {
-                IncludeSubdirectories = true,
-                EnableRaisingEvents = true,
-                NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.CreationTime
-            };
+    public string FolderPath { get; }
 
-            watcher.Changed += OnChanged;
-            watcher.Deleted += OnChanged;
-            watcher.Created += OnCreated;
-            watcher.Renamed += OnRenamed;
+    public string LogFilePath { get; }
+
+    public bool IsRunning => _watcher.EnableRaisingEvents;
+
+    public void Start()
+    {
+        ThrowIfDisposed();
+        _watcher.EnableRaisingEvents = true;
+        WriteLogLine("Monitoring enabled.");
+    }
+
+    public void Stop()
+    {
+        if (_disposed)
+        {
+            return;
         }
 
-        private void OnChanged(object sender, FileSystemEventArgs e)
+        _watcher.EnableRaisingEvents = false;
+        WriteLogLine("Monitoring paused.");
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
         {
-            LogSuspiciousActivity(e.FullPath, e.ChangeType.ToString());
+            return;
         }
 
-        private void OnCreated(object sender, FileSystemEventArgs e)
+        _watcher.EnableRaisingEvents = false;
+        _watcher.Changed -= OnChanged;
+        _watcher.Created -= OnCreated;
+        _watcher.Deleted -= OnDeleted;
+        _watcher.Renamed -= OnRenamed;
+        _watcher.Error -= OnError;
+        _watcher.Dispose();
+        _disposed = true;
+    }
+
+    private void OnChanged(object? sender, FileSystemEventArgs e)
+    {
+        LogSuspiciousActivity(e.FullPath, "Modified");
+    }
+
+    private void OnCreated(object? sender, FileSystemEventArgs e)
+    {
+        string extension = Path.GetExtension(e.FullPath);
+        string action = SuspiciousExtensions.Contains(extension)
+            ? "New executable or script created"
+            : "Created";
+
+        LogSuspiciousActivity(e.FullPath, action);
+    }
+
+    private void OnDeleted(object? sender, FileSystemEventArgs e)
+    {
+        LogSuspiciousActivity(e.FullPath, "Deleted");
+    }
+
+    private void OnRenamed(object? sender, RenamedEventArgs e)
+    {
+        LogSuspiciousActivity(e.FullPath, $"Renamed from {e.OldFullPath}");
+    }
+
+    private void OnError(object? sender, ErrorEventArgs e)
+    {
+        WriteLogLine($"Monitor warning: {e.GetException().Message}. Some file events may have been missed.");
+    }
+
+    private void LogSuspiciousActivity(string filePath, string action)
+    {
+        string fileName = Path.GetFileName(filePath);
+
+        if (string.IsNullOrWhiteSpace(fileName))
         {
-            // If a new exe appears, log it. Other created files will still be logged by Changed if needed.
-            if (Path.GetExtension(e.FullPath).Equals(".exe", StringComparison.OrdinalIgnoreCase))
+            return;
+        }
+
+        if (fileName.Equals("SecurityLog.txt", StringComparison.OrdinalIgnoreCase)
+            || fileName.Equals(EncryptionHelper.FolderMetadataFileName, StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".enc", StringComparison.OrdinalIgnoreCase)
+            || fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase)
+            || fileName.StartsWith("~$", StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        DateTime now = DateTime.UtcNow;
+        string dedupeKey = $"{action}|{filePath}";
+
+        lock (_eventLock)
+        {
+            if (_lastEventTimes.TryGetValue(dedupeKey, out DateTime lastSeen)
+                && (now - lastSeen).TotalMilliseconds < 800)
             {
-                LogSuspiciousActivity(e.FullPath, "New EXE Created");
+                return;
             }
-        }
 
-        private void OnRenamed(object sender, RenamedEventArgs e)
-        {
-            LogSuspiciousActivity(e.FullPath, $"Renamed from {e.OldFullPath}");
-        }
+            _lastEventTimes[dedupeKey] = now;
 
-        private void LogSuspiciousActivity(string filePath, string action)
-        {
-            // --- 1) Basic filename checks ---
-            string fileName = Path.GetFileName(filePath); // <-- declare fileName here
-
-            // Ignore changes to the log file itself to avoid infinite feedback loops
-            if (fileName.Equals("SecurityLog.txt", StringComparison.OrdinalIgnoreCase))
-                return;
-
-            // Ignore encrypted files if you don't want them logged
-            if (fileName.EndsWith(".enc", StringComparison.OrdinalIgnoreCase))
-                return;
-
-            // Optionally ignore temp/lock files from editors (add more rules as needed)
-            if (fileName.StartsWith("~$") || fileName.EndsWith(".tmp", StringComparison.OrdinalIgnoreCase))
-                return;
-
-            // --- 2) Debounce duplicate events for the same path ---
-            DateTime now = DateTime.UtcNow;
-            lock (_lock)
+            if (_lastEventTimes.Count > 500)
             {
-                if (_lastEventTimes.TryGetValue(filePath, out DateTime last))
+                DateTime expiry = now.AddMinutes(-5);
+                foreach (string key in _lastEventTimes.Where(entry => entry.Value < expiry).Select(entry => entry.Key).ToList())
                 {
-                    // If the last logged event for this file was less than 800ms ago, ignore this one
-                    if ((now - last).TotalMilliseconds < 800)
-                        return;
+                    _lastEventTimes.Remove(key);
                 }
-                _lastEventTimes[filePath] = now;
-            }
-
-            // --- 3) Send to UI if logger is available ---
-            string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}: {action} on {filePath}";
-            _logger?.Invoke(line);
-
-            // Always log to console too (optional)
-            Console.WriteLine($"[LOG] {line}");
-
-            // --- 4) Append to log file ---
-            string logFile = Path.Combine(folderPath, "SecurityLog.txt");
-            try
-            {
-                File.AppendAllText(logFile, line + Environment.NewLine);
-            }
-            catch
-            {
-                // Swallow file lock/permission errors
             }
         }
+
+        WriteLogLine($"{action}: {filePath}");
+    }
+
+    private void WriteLogLine(string message)
+    {
+        string line = $"{DateTime.Now:yyyy-MM-dd HH:mm:ss}  {message}";
+        _logger?.Invoke(line);
+        Console.WriteLine($"[LOG] {line}");
+
+        try
+        {
+            lock (_logFileLock)
+            {
+                File.AppendAllText(LogFilePath, line + Environment.NewLine);
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private void ThrowIfDisposed()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
     }
 }
