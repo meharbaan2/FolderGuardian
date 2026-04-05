@@ -1,120 +1,52 @@
-# FolderGuardian
+﻿# FolderGuardian 🔒
 
-FolderGuardian is a C# WPF desktop tool for protecting sensitive folders on Windows.
+FolderGuardian is a Windows desktop tool (C# WPF) for protecting sensitive folders through **AES-256 encryption (keys secured with DPAPI)** and **real-time monitoring**.  
+It lets you encrypt or decrypt a folder on demand, while keeping a security log of suspicious file activity such as unexpected modifications, deletions, or creation of `.exe` files.
 
-It can:
+---
 
-- Encrypt files in a folder with AES-256.
-- Decrypt both new and older `.enc` files created by previous versions of the app.
-- Store encryption material with DPAPI so keys stay tied to the current Windows user profile.
-- Monitor a folder in real time and log suspicious file activity to `SecurityLog.txt`.
+## ✨ Features
+- **AES-256 encryption** with keys protected by **DPAPI** (user-specific).
+- On-demand **Encrypt / Decrypt** buttons for quick folder protection.
+- **Real-time monitoring** of the chosen folder:
+  - Detects modifications and deletions.
+  - Logs suspicious activity (e.g., unexpected `.exe` creation).
+- Security log (`SecurityLog.txt`) saved in the protected folder.
+- Simple, minimal WPF UI.
 
-## Current Status
+---
 
-This project now uses a single WPF app layout instead of the older split console/WPF structure.
+## 🔑 Key Management
+- Encryption keys are stored securely via DPAPI at:
+C:\Users<YourName>\AppData\Roaming\FolderGuardian\protected.key
+- Currently, DPAPI is used automatically.  
+- **Optional future extension:** support for **password-based encryption** if you prefer user-provided secrets.
 
-New encryptions use a stronger format than the original version:
+---
 
-- A fresh IV is generated per file.
-- A per-file derived key flow is used.
-- Integrity validation is included, so tampered encrypted files are detected during decryption.
+## 🛠️ Possible Extensions
+These are not implemented but straightforward to add:
+- **Recursive encryption** (encrypt subfolders as well).
+- **Filename scrambling** (obfuscate file names during encryption).
+- **Password-based encryption** instead of DPAPI.
 
-Older encrypted files are still supported.
+---
 
-- Legacy `.enc` files created by the earlier version can still be decrypted.
-- The old DPAPI key file is preserved at `%APPDATA%\FolderGuardian\protected.key`.
-- New encryptions use `%APPDATA%\FolderGuardian\protected.v2.key`.
+## 🚀 Usage
+1. Clone the repository.
+2. Build the project (`FolderGuardian.sln`).
+3. Run the WPF application.
+4. Choose a sensitive folder path in `MainWindow.xaml.cs` (default: `D:\SensitiveFolder`).
+5. Use the UI buttons to:
+ - **Encrypt Folder**
+ - **Decrypt Folder**
+ - **Start Monitoring**
+6. Check `SecurityLog.txt` inside the folder for logged events.
 
-## Tech Stack
+---
 
-- .NET 8
-- WPF
-- AES-256
-- Windows DPAPI
-- `FileSystemWatcher`
-
-## Project Structure
-
-```text
-FolderGuardian/
-  Core/
-    EncryptionHelper.cs
-    FolderEncryptor.cs
-    FolderMonitor.cs
-    FolderOperationSummary.cs
-    HashingWriteStream.cs
-    LimitedReadStream.cs
-  App.xaml
-  App.xaml.cs
-  MainWindow.xaml
-  MainWindow.xaml.cs
-  FolderGuardian.csproj
-  FolderGuardian.sln
-```
-
-## Features
-
-### 1. Folder Encryption
-
-- Encrypts files recursively inside the selected folder.
-- Obfuscates subfolder names recursively, including deep folder-only chains before the actual files.
-- Writes encrypted output under an obfuscated random `.enc` filename.
-- Stores the original filename inside the encrypted payload so decryption can restore it later.
-- Stores original subfolder names in protected metadata so they can be restored during decryption.
-- Removes the original plaintext file after successful encryption.
-
-### 2. Folder Decryption
-
-- Decrypts recursive `.enc` files inside the selected folder.
-- Supports both the current format and the older legacy format.
-- Restores the original filename for files encrypted by the current format.
-- Restores obfuscated subfolder names recursively after file recovery finishes.
-- Removes the encrypted file after successful decryption.
-
-### 3. Real-Time Monitoring
-
-- Watches the selected folder and subfolders.
-- Logs create, modify, delete, and rename activity.
-- Highlights newly created executable or script-like files.
-- Writes entries into `SecurityLog.txt` in the monitored folder.
-
-### 4. Desktop UI
-
-- Folder picker instead of a hardcoded path.
-- Encrypt, decrypt, and monitor controls.
-- Live activity log.
-- Status summary and key storage information.
-- Progress feedback with a rolling ETA estimate during encrypt/decrypt operations.
-
-## Build and Run
-
-Requirements:
-
-- Windows
-- .NET 8 SDK
-
-Build:
-
-```powershell
-dotnet build .\FolderGuardian.sln
-```
-
-Run:
-
-```powershell
-dotnet run --project .\FolderGuardian.csproj
-```
-
-## Important Notes
-
-- DPAPI ties the key material to the Windows user profile that created it.
-- If `%APPDATA%\FolderGuardian\protected.key` is lost, older legacy encrypted files may become unrecoverable.
-- If `%APPDATA%\FolderGuardian\protected.v2.key` is lost, files encrypted by the current format may become unrecoverable.
-- This app is designed for local protection and recovery on the same Windows account, not for secure key sharing between machines.
-
-## Suggested Next Improvements
-
-- Add automated tests for encrypt/decrypt and legacy compatibility.
-- Add explicit progress reporting and cancellation for very large folders.
-- Add export/backup guidance for key files.
-- Add configurable monitoring rules and exclusions.
+## ⚠️ Disclaimer
+This project is for **educational and personal use only**.  
+FolderGuardian uses strong encryption (AES-256 + DPAPI).
+However, the monitoring component runs in user mode, not kernel level, so it can be bypassed by a determined attacker.
+Treat this as a personal or educational tool, not a full enterprise-grade endpoint protection system.
